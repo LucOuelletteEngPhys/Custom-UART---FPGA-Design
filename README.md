@@ -1,5 +1,5 @@
 # Custom-UART
-Custom UART Receiver and Transmitter modules 
+Custom UART Receiver and Transmitter modules.
 
 ## Overview
 UART receiver and transmitter modules designed for ASCII character 
