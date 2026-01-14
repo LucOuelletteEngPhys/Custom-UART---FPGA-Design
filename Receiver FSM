@@ -1,0 +1,164 @@
+`timescale 1ns / 1ps
+`default_nettype wire
+
+module FSM(
+    input  logic rst,
+    input  logic tick_16x,
+    input  logic uart_in_rx,
+    output logic frame_error,
+    output logic reg_ce,
+    output logic reg_oe,
+    output logic bit_input,
+    output logic [2:0] idx,
+    output logic state_chk
+);
+
+    // UART RX parameters
+    localparam integer OVERSAMPLE = 16;
+    localparam integer HALF_BIT   = OVERSAMPLE/2;
+
+    // FSM state definitions
+    typedef enum logic [2:0] {
+        S_IDLE,      // waiting for start bit
+        S_START,     // validating start bit
+        S_DATA,      // receiving 8 data bits
+        S_STOP       // stop bit check
+    } state_t;
+
+    state_t curr_state, next_state;
+
+    // Internal registers
+    logic [3:0] tick_count;      // counts 0-15 ticks
+    logic [2:0] bit_idx;         // counts 0-7 bits
+    logic sample_en;             // 1 when it's time to sample
+    logic uart_rx_sync, uart_rx_prev;
+    logic start_detect;
+    
+    logic state_check = 0;
+    
+    assign state_chk = state_check;
+    assign idx = bit_idx;
+
+    //----------------------------------------
+    // Synchronize RX input & detect falling edge
+    //----------------------------------------
+    always_ff @(posedge tick_16x or posedge rst) begin
+        if (rst) begin
+            uart_rx_sync <= 1'b1;
+            uart_rx_prev <= 1'b1;
+        end else begin
+            uart_rx_prev <= uart_rx_sync;
+            uart_rx_sync <= uart_in_rx;
+        end
+    end
+
+    assign start_detect = (uart_rx_prev == 1'b1 && uart_rx_sync == 1'b0); // falling edge
+
+    //----------------------------------------
+    // Sample timing counter
+    //----------------------------------------
+    always_ff @(posedge tick_16x or posedge rst) begin
+        if (rst) begin
+            tick_count <= 0;
+            sample_en  <= 0;
+        end else begin
+            sample_en <= 0; // default: not sampling
+            if (curr_state != S_IDLE) begin
+                tick_count <= tick_count + 1'b1;// increment tick_count at every tick posedge
+
+                if (curr_state == S_START) begin // first, we switch IDLE -> START, then @ next sample_en we switch further to DATA and start sampling it
+                    if (tick_count == (HALF_BIT - 1)) begin
+                        sample_en <= 1'b1;
+                        tick_count <=0;
+                        // keep tick_count running; next sample (data bit 1) will happen after OVERSAMPLE ticks
+                    end
+                end
+                // When in DATA or STOP, sample at full OVERSAMPLE intervals
+                else if (curr_state == S_DATA || curr_state == S_STOP) begin
+                    if (tick_count == (OVERSAMPLE - 1)) begin
+                        sample_en  <= 1'b1;
+                        tick_count <= 0; // wrap for next OVERSAMPLE interval
+                    end
+                end
+            end else begin
+                tick_count <= 0; // if in idle, don't count ticks for sampling
+            end
+        end
+    end
+
+    //----------------------------------------
+    // FSM state register
+    //----------------------------------------
+    always_ff @(posedge tick_16x or posedge rst) begin
+        if (rst)
+            curr_state <= S_IDLE;
+        else
+            curr_state <= next_state;
+    end
+
+    //----------------------------------------
+    // FSM next-state and outputs
+    //----------------------------------------
+    always_comb begin
+        // Defaults
+        next_state  = curr_state;
+        reg_ce      = 0;
+        reg_oe      = 0;
+        frame_error = 0;
+
+        case (curr_state)
+            S_IDLE: begin
+                if (start_detect) // input stream switched 1 -> 0 during recently ended clk posedge
+                    next_state = S_START; 
+            end
+
+            S_START: begin // tick counting also starts here
+                if (sample_en) begin
+                    if (uart_rx_sync == 1'b0) // this avoids sampling in START state - if still in START state && sampled => skip to directly DATA state
+                        next_state = S_DATA; // valid start
+                    else
+                        next_state = S_IDLE; // if the bit in start state is 1 => false start, jump back to IDLE state
+                end
+            end
+
+            S_DATA: begin
+                state_check = 1;
+                if (sample_en) begin
+                    reg_ce    = 1'b1;         // latch data
+                end
+                if (sample_en && bit_idx == 3'b111)
+                    next_state = S_STOP; // switch to next state if 
+            end
+
+            S_STOP: begin
+                
+                if (sample_en) begin
+                    if (uart_rx_sync == 1'b1)
+                        reg_oe = 1'b1;        // word ready
+                    else
+                        frame_error = 1'b1;   // framing error
+                    next_state = S_IDLE;
+                end
+            end
+        endcase
+    end
+
+    //----------------------------------------
+    // Bit counter and data sampling
+    //----------------------------------------
+    always_ff @(posedge tick_16x or posedge rst) begin
+        if (rst) begin
+            bit_idx   <= 0;
+            bit_input <= 0;
+        end else begin
+            // bit_idx only gets incremented when  in data state (0->7) 
+            if (curr_state == S_DATA && sample_en) begin
+                bit_input <= uart_rx_sync; // bit_input gets routed to 
+                bit_idx   <= bit_idx + 1'b1;
+            end else if (curr_state == S_IDLE) begin
+                bit_idx <= 0; // idle state => counter resets
+            end
+        end
+    end
+
+endmodule
