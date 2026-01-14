@@ -1,0 +1,31 @@
+`timescale 1ns / 1ps
+`default_nettype wire
+
+module receiver_DP (
+    input  logic        clk,       // same clock as FSM (tick_16x)
+    input  logic        rst,
+    input  logic        reg_ce,    // latch one bit
+    input  logic        reg_oe,    // latch full byte
+    input  logic        bit_input, // serial bit from FSM
+    input  logic [2:0]  bit_idx,   // bit index 0-7
+    output logic [7:0]  rx_data    // final received byte
+);
+    logic [7:0] rx_shift;
+
+    // Shift register: store bit_input at the correct index when reg_ce is high
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst)
+            rx_shift <= 8'b0;
+        else if (reg_ce)
+            rx_shift[bit_idx-1] <= bit_input;
+    end
+
+    // Output latch: capture the byte when reg_oe is asserted
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst)
+            rx_data <= 8'b0;
+        else if (reg_oe)
+            rx_data <= rx_shift;
+    end
+
+endmodule
