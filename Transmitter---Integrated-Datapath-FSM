@@ -1,0 +1,132 @@
+`timescale 1ns / 1ps
+`default_nettype wire
+
+module FSM_t (
+    input  logic        clk,            // tick_16x clock
+    input  logic        rst,            // async reset
+    input  logic [7:0]  tx_in,          // data to send
+    input  logic        transm_button,  // start transmit (1 pulse)
+    output logic        uart_tx_out,    // serial output
+    output logic        busy            // high while transmitting
+);
+
+    // UART parameters
+    localparam integer OVERSAMPLE = 16;
+
+    // FSM states
+    typedef enum logic [2:0] {
+        S_IDLE,
+        S_START,
+        S_DATA,
+        S_STOP
+    } state_t;
+
+    state_t curr_state, next_state;
+    logic [3:0] tick_count;
+    logic [2:0] bit_idx;
+    logic [7:0] tx_reg;
+    logic sample_en;
+    logic start_pulse;
+    logic btn_sync1, btn_sync2, btn_prev;
+
+    //----------------------------------------
+    // Synchronize and edge-detect transmit button
+    //----------------------------------------
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            btn_sync1 <= 0;
+            btn_sync2 <= 0;
+            btn_prev  <= 0;
+        end else begin
+            btn_sync1 <= transm_button;
+            btn_sync2 <= btn_sync1;
+            btn_prev  <= btn_sync2;
+        end
+    end
+
+    assign start_pulse = (btn_prev == 0 && btn_sync2 == 1);
+
+    //----------------------------------------
+    // Tick counter for bit timing
+    //----------------------------------------
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            tick_count <= 0;
+            sample_en  <= 0;
+        end else begin
+            sample_en <= 0; // default: not sampling
+            if (curr_state != S_IDLE) begin
+                tick_count <= tick_count + 1'b1;// increment tick_count at every tick posedge
+
+                if (curr_state == S_START) begin // first, we switch IDLE -> START, then @ next sample_en we switch further to DATA and start sampling it
+                    if (tick_count == (OVERSAMPLE/2 - 1)) begin
+                        sample_en <= 1'b1;
+                        tick_count <=0;
+                        // keep tick_count running; next sample (data bit 1) will happen after OVERSAMPLE ticks
+                    end
+                end
+                // When in DATA or STOP, sample at full OVERSAMPLE intervals
+                else if (curr_state == S_DATA || curr_state == S_STOP) begin
+                    if (tick_count == (OVERSAMPLE - 1)) begin
+                        sample_en  <= 1'b1;
+                        tick_count <= 0; // wrap for next OVERSAMPLE interval
+                    end
+                end
+            end else begin
+                tick_count <= 0; // if in idle, don't count ticks for sampling
+            end
+        end
+    end
+
+    //----------------------------------------
+    // FSM state register
+    //----------------------------------------
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst)
+            curr_state <= S_IDLE;
+        else
+            curr_state <= next_state;
+    end
+
+    //----------------------------------------
+    // FSM next-state and control
+    //----------------------------------------
+    always_comb begin
+        next_state = curr_state;
+        case (curr_state)
+            S_IDLE:  if (start_pulse) next_state = S_START;
+            S_START: if (sample_en)   next_state = S_DATA;
+            S_DATA:  if (sample_en && bit_idx == 3'd7) next_state = S_STOP;
+            S_STOP:  if (sample_en)   next_state = S_IDLE;
+        endcase
+    end
+
+    //----------------------------------------
+    // Transmit bit logic
+    //----------------------------------------
+    always_ff @(posedge clk or posedge rst) begin
+        if (rst) begin
+            uart_tx_out <= 1'b1;  // idle high
+            bit_idx     <= 0;
+            tx_reg      <= 8'b0; // inititalize tx_reg
+        end else begin
+            case (curr_state)
+                S_IDLE: begin
+                    uart_tx_out <= 1'b1;
+                    if (start_pulse) tx_reg <= tx_in; // assign tx_reg to data read from FPGA switches
+                end
+                S_START: if (sample_en) uart_tx_out <= 1'b0; // start bit
+                S_DATA: begin
+                    if (sample_en) begin
+                        uart_tx_out <= tx_reg[bit_idx];
+                        bit_idx <= bit_idx + 1'b1;
+                    end
+                end
+                S_STOP: if (sample_en) uart_tx_out <= 1'b1; // stop bit
+            endcase
+        end
+    end
+
+    assign busy = (curr_state != S_IDLE);
+
+endmodule
