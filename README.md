@@ -17,6 +17,7 @@ and communicated with a host computer using TeraTerm.
 
 ## Architecture
 
+
 ## Design/Implementation Tools
 - SystemVerilog
 - Vivado
