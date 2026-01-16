@@ -16,7 +16,7 @@ and communicated with a host computer using TeraTerm.
 - System-level Integration
 
 ## Architecture
-![System block diagram](doc/images/system_block_diagram.jpg)
+![System block diagram](doc/images/UART_block_diagram.jpg)
 
 ## Design/Implementation Tools
 - SystemVerilog
